@@ -22,6 +22,13 @@ const NAV2_H: f32 = 40.0;
 const MAX_THUMBS: usize = 150;
 
 #[derive(Clone, Copy, PartialEq)]
+enum Owner {
+    All,
+    Mine,
+    Others,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum LibTab {
     Playlists,
     Albums,
@@ -49,6 +56,8 @@ pub struct App {
     lib_tab: LibTab,
     /// Filters the open library tab by name.
     lib_filter: String,
+    /// Which playlists to show by owner.
+    owner: Owner,
     /// Album thumbnails, with the frame each was last drawn in.
     thumbs: std::collections::HashMap<String, (TextureHandle, u64)>,
     thumbs_pending: std::collections::HashSet<String>,
@@ -77,6 +86,7 @@ impl App {
             about_open: false,
             lib_tab: LibTab::Playlists,
             lib_filter: String::new(),
+            owner: Owner::All,
             thumbs: Default::default(),
             thumbs_pending: Default::default(),
             frame: 0,
@@ -319,6 +329,17 @@ impl App {
                 self.lib_filter.clear();
             }
         });
+        if self.lib_tab == LibTab::Playlists {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (owner, label) in [(Owner::All, "All"), (Owner::Mine, "By you"), (Owner::Others, "By others")] {
+                    let chip = egui::Button::selectable(self.owner == owner, RichText::new(label).small()).corner_radius(10);
+                    if ui.add(chip).clicked() {
+                        self.owner = owner;
+                    }
+                }
+            });
+        }
         ui.add_space(4.0);
         let query = self.lib_filter.trim().to_lowercase();
         let matches = |text: &str| text.to_lowercase().contains(&query);
@@ -329,10 +350,15 @@ impl App {
             LibTab::Playlists => {
                 let mut want_thumbs = Vec::new();
                 let mut order = pinned_first(s.playlists.iter().map(|p| p.uri.as_str()), &self.pins);
+                match self.owner {
+                    Owner::All => {}
+                    Owner::Mine => order.retain(|&i| s.playlists[i].mine),
+                    Owner::Others => order.retain(|&i| !s.playlists[i].mine),
+                }
                 if !query.is_empty() {
                     order.retain(|&i| matches(&s.playlists[i].name));
-                    no_matches(ui, order.is_empty());
                 }
+                no_matches(ui, order.is_empty() && !s.playlists.is_empty());
                 egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV2_H, order.len(), |ui, rows| {
                     for &i in &order[rows] {
                         let p = &s.playlists[i];

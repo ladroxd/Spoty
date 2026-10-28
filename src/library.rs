@@ -36,6 +36,8 @@ pub struct Playlist {
     pub uri: String,
     pub name: String,
     pub songs: u32,
+    /// Created by the signed-in user (as opposed to followed).
+    pub mine: bool,
     /// A small cover, when the playlist has its own picture. Playlists showing Spotify's
     /// 4-album mosaic have none: building one would cost several requests each.
     pub thumb_url: Option<String>,
@@ -152,7 +154,7 @@ impl Library {
         let mut from = 0;
         loop {
             let list = self
-                .get(&format!("/playlist/v2/user/{user}/rootlist?decorate=attributes,length&from={from}&length={PAGE}"))
+                .get(&format!("/playlist/v2/user/{user}/rootlist?decorate=attributes,length,owner&from={from}&length={PAGE}"))
                 .await?;
             let items = list["contents"]["items"].as_array().map(Vec::as_slice).unwrap_or_default();
             let meta = list["contents"]["metaItems"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -168,6 +170,7 @@ impl Library {
                     uri: uri.to_string(),
                     name: name.to_string(),
                     songs: m["length"].as_u64().unwrap_or(0) as u32,
+                    mine: m["ownerUsername"].as_str() == Some(user.as_str()),
                     thumb_url: playlist_thumb(&m["attributes"]),
                 });
             }
