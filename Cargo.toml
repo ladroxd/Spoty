@@ -1,0 +1,33 @@
+[package]
+name = "spoty"
+version = "0.1.0"
+edition = "2024"
+description = "A tiny native Spotify player"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect"] }
+futures-util = "0.3"
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+egui = "0.34"
+egui_software_backend = "0.0.3"
+# The CPU renderer leaves clipboard support off; turn it on so Ctrl+C / Ctrl+V work.
+egui-winit = { version = "0.34", default-features = false, features = ["clipboard"] }
+arboard = { version = "3", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+log = "0.4"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_System_Registry"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[build-dependencies]
+winresource = "0.1"
