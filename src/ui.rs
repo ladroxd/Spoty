@@ -47,6 +47,8 @@ pub struct App {
     cache_size: Option<(std::time::Instant, u64)>,
     about_open: bool,
     lib_tab: LibTab,
+    /// Filters the open library tab by name.
+    lib_filter: String,
     /// Album thumbnails, with the frame each was last drawn in.
     thumbs: std::collections::HashMap<String, (TextureHandle, u64)>,
     thumbs_pending: std::collections::HashSet<String>,
@@ -74,6 +76,7 @@ impl App {
             cache_size: None,
             about_open: false,
             lib_tab: LibTab::Playlists,
+            lib_filter: String::new(),
             thumbs: Default::default(),
             thumbs_pending: Default::default(),
             frame: 0,
@@ -282,8 +285,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (tab, label) in [(LibTab::Playlists, "Playlists"), (LibTab::Albums, "Albums"), (LibTab::Artists, "Artists")] {
-                if ui.add(egui::Button::selectable(self.lib_tab == tab, label).corner_radius(12)).clicked() {
+                if ui.add(egui::Button::selectable(self.lib_tab == tab, label).corner_radius(12)).clicked() && self.lib_tab != tab {
                     self.lib_tab = tab;
+                    self.lib_filter.clear();
                 }
             }
         });
@@ -295,12 +299,40 @@ impl App {
             LibTab::Artists if s.artists.is_none() => self.send(Cmd::LoadArtists),
             _ => {}
         }
+        ui.horizontal(|ui| {
+            let hint = match self.lib_tab {
+                LibTab::Playlists => "Filter playlists",
+                LibTab::Albums => "Filter albums or artists",
+                LibTab::Artists => "Filter artists",
+            };
+            let clear_w = if self.lib_filter.is_empty() { 0.0 } else { 26.0 };
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.lib_filter)
+                    .hint_text(hint)
+                    .desired_width(ui.available_width() - clear_w)
+                    .margin(Margin::symmetric(8, 4)),
+            );
+            if r.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.lib_filter.clear();
+            }
+            if !self.lib_filter.is_empty() && ui.small_button("✕").on_hover_text("Clear filter").clicked() {
+                self.lib_filter.clear();
+            }
+        });
+        ui.add_space(4.0);
+        let query = self.lib_filter.trim().to_lowercase();
+        let matches = |text: &str| text.to_lowercase().contains(&query);
+
         let mut missing = Vec::new();
         let mut toggle_pin: Option<String> = None;
         match self.lib_tab {
             LibTab::Playlists => {
                 let mut want_thumbs = Vec::new();
-                let order = pinned_first(s.playlists.iter().map(|p| p.uri.as_str()), &self.pins);
+                let mut order = pinned_first(s.playlists.iter().map(|p| p.uri.as_str()), &self.pins);
+                if !query.is_empty() {
+                    order.retain(|&i| matches(&s.playlists[i].name));
+                    no_matches(ui, order.is_empty());
+                }
                 egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV2_H, order.len(), |ui, rows| {
                     for &i in &order[rows] {
                         let p = &s.playlists[i];
@@ -331,7 +363,13 @@ impl App {
                     });
                 }
                 let mut want_thumbs = Vec::new();
-                let order = pinned_first(albums.iter().map(String::as_str), &self.pins);
+                let mut order = pinned_first(albums.iter().map(String::as_str), &self.pins);
+                if !query.is_empty() {
+                    // Filtering needs every album's name, not just the ones scrolled past.
+                    missing.extend(albums.iter().filter(|u| !s.names.contains_key(*u)).cloned());
+                    order.retain(|&i| s.names.get(&albums[i]).is_some_and(|n| matches(&n.name) || matches(&n.subtitle)));
+                    no_matches(ui, order.is_empty() && !albums.is_empty());
+                }
                 egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV2_H, order.len(), |ui, rows| {
                     for &i in &order[rows] {
                         let uri = &albums[i];
@@ -362,7 +400,12 @@ impl App {
                         ui.label(RichText::new("Loading artists…").small().color(MUTED));
                     });
                 }
-                let order = pinned_first(artists.iter().map(String::as_str), &self.pins);
+                let mut order = pinned_first(artists.iter().map(String::as_str), &self.pins);
+                if !query.is_empty() {
+                    missing.extend(artists.iter().filter(|u| !s.names.contains_key(*u)).cloned());
+                    order.retain(|&i| s.names.get(&artists[i]).is_some_and(|n| matches(&n.name)));
+                    no_matches(ui, order.is_empty() && !artists.is_empty());
+                }
                 egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV_H, order.len(), |ui, rows| {
                     for &i in &order[rows] {
                         let uri = &artists[i];
@@ -875,6 +918,12 @@ fn pinned_first<'a>(uris: impl Iterator<Item = &'a str>, pins: &[String]) -> Vec
     let mut order: Vec<usize> = pins.iter().filter_map(|p| uris.iter().position(|u| u == p)).collect();
     order.extend((0..uris.len()).filter(|&i| !pins.iter().any(|p| p == uris[i])));
     order
+}
+
+fn no_matches(ui: &mut egui::Ui, empty: bool) {
+    if empty {
+        ui.label(RichText::new("No matches").small().color(MUTED));
+    }
 }
 
 /// Right-click menu on a sidebar row.
