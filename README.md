@@ -27,7 +27,8 @@ Spoty is a lightweight alternative to the Spotify desktop app. It's written in R
 
 ## Getting started
 
-1. Download `spoty.exe` and run it. Nothing to install.
+1. Download `spoty.exe` from [Releases](https://github.com/ladroxd/spoty/releases/latest) and run it. Nothing to install.
+   Windows may show a SmartScreen warning because the app isn't code-signed: click **More info → Run anyway**.
 2. Sign in with Spotify in the browser window that opens.
 3. Paste your Soloist API key when Spoty asks. Spoty downloads Soloist from Spotify and keeps it up to date.
 4. Once: in the Spotify app on your phone or another computer, open the device list and pick **Spoty**.
