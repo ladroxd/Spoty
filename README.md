@@ -68,3 +68,7 @@ Spoty is an independent project. It isn't made, endorsed or supported by Spotify
 ## Author
 
 Made by [Ladro](https://github.com/ladroxd).
+
+## License
+
+[MIT](LICENSE)
