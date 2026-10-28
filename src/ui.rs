@@ -51,6 +51,8 @@ pub struct App {
     thumbs: std::collections::HashMap<String, (TextureHandle, u64)>,
     thumbs_pending: std::collections::HashSet<String>,
     frame: u64,
+    /// Pinned playlists/albums/artists, most recently pinned first.
+    pins: Vec<String>,
 }
 
 impl App {
@@ -75,6 +77,7 @@ impl App {
             thumbs: Default::default(),
             thumbs_pending: Default::default(),
             frame: 0,
+            pins: load_pins(),
         }
     }
 
@@ -272,7 +275,7 @@ impl App {
 
     fn library(&mut self, ui: &mut egui::Ui, s: &State) {
         ui.add_space(4.0);
-        if nav_item(ui, "♥  Liked Songs", s.view == View::Liked).clicked() {
+        if nav_item(ui, "♥  Liked Songs", false, s.view == View::Liked).clicked() {
             self.send(Cmd::OpenLiked);
         }
         ui.add_space(8.0);
@@ -293,19 +296,26 @@ impl App {
             _ => {}
         }
         let mut missing = Vec::new();
+        let mut toggle_pin: Option<String> = None;
         match self.lib_tab {
             LibTab::Playlists => {
                 let mut want_thumbs = Vec::new();
-                egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV2_H, s.playlists.len(), |ui, rows| {
-                    for p in &s.playlists[rows] {
+                let order = pinned_first(s.playlists.iter().map(|p| p.uri.as_str()), &self.pins);
+                egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV2_H, order.len(), |ui, rows| {
+                    for &i in &order[rows] {
+                        let p = &s.playlists[i];
+                        let pinned = self.pins.contains(&p.uri);
                         let thumb = self.thumb(&p.uri, p.thumb_url.as_deref(), &mut want_thumbs);
                         let songs = match p.songs {
                             1 => "1 song".to_string(),
                             n => format!("{n} songs"),
                         };
-                        if nav_item2(ui, thumb, &p.name, &songs, s.view == View::Playlist(p.uri.clone())).clicked() {
+                        let sub = if pinned { format!("Pinned · {songs}") } else { songs };
+                        let r = nav_item2(ui, thumb, &p.name, &sub, pinned, s.view == View::Playlist(p.uri.clone()));
+                        if r.clicked() {
                             self.send(Cmd::OpenPlaylist(p.clone()));
                         }
+                        pin_menu(&r, &p.uri, pinned, &mut toggle_pin);
                     }
                 });
                 if !want_thumbs.is_empty() {
@@ -321,17 +331,23 @@ impl App {
                     });
                 }
                 let mut want_thumbs = Vec::new();
-                egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV2_H, albums.len(), |ui, rows| {
-                    for uri in &albums[rows] {
+                let order = pinned_first(albums.iter().map(String::as_str), &self.pins);
+                egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV2_H, order.len(), |ui, rows| {
+                    for &i in &order[rows] {
+                        let uri = &albums[i];
+                        let pinned = self.pins.contains(uri);
                         let named = s.names.get(uri);
                         if named.is_none() {
                             missing.push(uri.clone());
                         }
                         let thumb = self.thumb(uri, named.and_then(|n| n.thumb_url.as_deref()), &mut want_thumbs);
-                        let (title, sub) = named.map_or(("…", ""), |n| (n.name.as_str(), n.subtitle.as_str()));
-                        if nav_item2(ui, thumb, title, sub, s.view == View::Album(uri.clone())).clicked() {
+                        let (title, artist) = named.map_or(("…", ""), |n| (n.name.as_str(), n.subtitle.as_str()));
+                        let sub = if pinned { format!("Pinned · {artist}") } else { artist.to_string() };
+                        let r = nav_item2(ui, thumb, title, &sub, pinned, s.view == View::Album(uri.clone()));
+                        if r.clicked() {
                             self.send(Cmd::OpenAlbum(uri.clone()));
                         }
+                        pin_menu(&r, uri, pinned, &mut toggle_pin);
                     }
                 });
                 if !want_thumbs.is_empty() {
@@ -346,19 +362,27 @@ impl App {
                         ui.label(RichText::new("Loading artists…").small().color(MUTED));
                     });
                 }
-                egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV_H, artists.len(), |ui, rows| {
-                    for uri in &artists[rows] {
+                let order = pinned_first(artists.iter().map(String::as_str), &self.pins);
+                egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, NAV_H, order.len(), |ui, rows| {
+                    for &i in &order[rows] {
+                        let uri = &artists[i];
+                        let pinned = self.pins.contains(uri);
                         let named = s.names.get(uri);
                         if named.is_none() {
                             missing.push(uri.clone());
                         }
                         let title = named.map_or("…", |n| n.name.as_str());
-                        if nav_item(ui, title, s.view == View::Artist(uri.clone())).clicked() {
+                        let r = nav_item(ui, title, pinned, s.view == View::Artist(uri.clone()));
+                        if r.clicked() {
                             self.send(Cmd::OpenArtist(uri.clone()));
                         }
+                        pin_menu(&r, uri, pinned, &mut toggle_pin);
                     }
                 });
             }
+        }
+        if let Some(uri) = toggle_pin {
+            self.toggle_pin(uri);
         }
         if !missing.is_empty() {
             self.send(Cmd::NeedNames(missing));
@@ -799,6 +823,17 @@ impl App {
         None
     }
 
+    fn toggle_pin(&mut self, uri: String) {
+        match self.pins.iter().position(|p| *p == uri) {
+            Some(i) => {
+                self.pins.remove(i);
+            }
+            None => self.pins.insert(0, uri),
+        }
+        let _ = std::fs::create_dir_all(crate::auth::data_dir());
+        let _ = std::fs::write(pins_file(), serde_json::to_string(&self.pins).unwrap_or_default());
+    }
+
     fn store_thumbs(&mut self, ctx: &egui::Context, fresh: Vec<(String, egui::ColorImage)>) {
         for (uri, img) in fresh {
             self.thumbs_pending.remove(&uri);
@@ -826,6 +861,37 @@ impl App {
     }
 }
 
+fn pins_file() -> std::path::PathBuf {
+    crate::auth::data_dir().join("pins.json")
+}
+
+fn load_pins() -> Vec<String> {
+    std::fs::read_to_string(pins_file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Row order for a sidebar list: pinned items (in pin order) first, then the rest as they come.
+fn pinned_first<'a>(uris: impl Iterator<Item = &'a str>, pins: &[String]) -> Vec<usize> {
+    let uris: Vec<&str> = uris.collect();
+    let mut order: Vec<usize> = pins.iter().filter_map(|p| uris.iter().position(|u| u == p)).collect();
+    order.extend((0..uris.len()).filter(|&i| !pins.iter().any(|p| p == uris[i])));
+    order
+}
+
+/// Right-click menu on a sidebar row.
+fn pin_menu(r: &egui::Response, uri: &str, pinned: bool, toggle: &mut Option<String>) {
+    r.context_menu(|ui| {
+        if ui.button(if pinned { "Unpin" } else { "Pin to top" }).clicked() {
+            *toggle = Some(uri.to_string());
+            ui.close();
+        }
+    });
+}
+
+/// Small accent dot marking a pinned row.
+fn pin_dot(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().circle_filled(egui::pos2(rect.right() - 9.0, rect.center().y), 3.0, ACCENT);
+}
+
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(6.0);
     ui.label(RichText::new(title).strong());
@@ -845,7 +911,14 @@ fn dir_size(dir: &std::path::Path) -> u64 {
 }
 
 /// A two-line sidebar row with a small cover: title and a muted subtitle (an album and its artist).
-fn nav_item2(ui: &mut egui::Ui, thumb: Option<egui::TextureId>, title: &str, subtitle: &str, selected: bool) -> egui::Response {
+fn nav_item2(
+    ui: &mut egui::Ui,
+    thumb: Option<egui::TextureId>,
+    title: &str,
+    subtitle: &str,
+    pinned: bool,
+    selected: bool,
+) -> egui::Response {
     let w = ui.available_width();
     let (rect, r) = ui.allocate_exact_size(Vec2::new(w, NAV2_H), Sense::click());
     if selected || r.hovered() {
@@ -864,14 +937,18 @@ fn nav_item2(ui: &mut egui::Ui, thumb: Option<egui::TextureId>, title: &str, sub
     }
     let x = 44.0;
     let color = if selected { ACCENT } else { ui.visuals().text_color() };
-    let top = elide(ui, title, FontId::proportional(14.0), color, w - x - 6.0);
+    let text_w = w - x - if pinned { 20.0 } else { 6.0 };
+    if pinned {
+        pin_dot(ui, rect);
+    }
+    let top = elide(ui, title, FontId::proportional(14.0), color, text_w);
     ui.painter().galley(rect.left_top() + Vec2::new(x, 4.0), top, color);
-    let sub = elide(ui, subtitle, FontId::proportional(12.0), MUTED, w - x - 6.0);
+    let sub = elide(ui, subtitle, FontId::proportional(12.0), MUTED, text_w);
     ui.painter().galley(rect.left_top() + Vec2::new(x, 22.0), sub, MUTED);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn nav_item(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+fn nav_item(ui: &mut egui::Ui, text: &str, pinned: bool, selected: bool) -> egui::Response {
     let w = ui.available_width();
     let (rect, r) = ui.allocate_exact_size(Vec2::new(w, 28.0), Sense::click());
     if selected || r.hovered() {
@@ -879,7 +956,10 @@ fn nav_item(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
         ui.painter().rect_filled(rect, 6, fill);
     }
     let color = if selected { ACCENT } else { ui.visuals().text_color() };
-    let galley = elide(ui, text, FontId::proportional(14.0), color, w - 16.0);
+    if pinned {
+        pin_dot(ui, rect);
+    }
+    let galley = elide(ui, text, FontId::proportional(14.0), color, w - if pinned { 28.0 } else { 16.0 });
     ui.painter().galley(rect.left_center() + Vec2::new(8.0, -galley.size().y / 2.0), galley, color);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
