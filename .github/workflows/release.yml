@@ -1,5 +1,6 @@
 # Builds spoty.exe and attaches it to a draft GitHub release whenever a version tag
-# (e.g. v0.1.0) is pushed. Review the draft on GitHub, then publish it.
+# (e.g. v0.1.0) is pushed. The release text comes from .github/release-notes/<tag>.md
+# (copy TEMPLATE.md to start one). Review the draft on GitHub, then publish it.
 name: Release
 
 on:
@@ -28,6 +29,14 @@ jobs:
             exit 1
           }
 
+      - name: Check the release notes exist
+        shell: pwsh
+        run: |
+          if (-not (Test-Path ".github/release-notes/${{ github.ref_name }}.md")) {
+            Write-Error "Missing .github/release-notes/${{ github.ref_name }}.md"
+            exit 1
+          }
+
       - name: Build
         run: cargo build --release --locked
 
@@ -42,7 +51,7 @@ jobs:
         with:
           draft: true
           name: Spoty ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: .github/release-notes/${{ github.ref_name }}.md
           files: |
             spoty.exe
             spoty.exe.sha256
