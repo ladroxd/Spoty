@@ -36,6 +36,11 @@ Soloist only runs on Apple Silicon Macs with macOS 13 or later, so there will be
 ## Smaller things
 
 - [ ] Albums and Artists tabs keep spinning when the list is empty or fails to load; show "Nothing here" or the error instead
-- [ ] "Show more" for search results (currently the top 20 songs)
-- [ ] Artist pages: albums and singles, not just top tracks
 - [ ] Podcasts and episodes
+
+## Equalizer
+
+Soloist has no equalizer, audio effects or raw audio output, and plays in its own process, so Spoty can't change the sound directly. The options found so far:
+
+- [ ] Decide on an approach: write settings for [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) (adds almost no RAM, but needs a one-time install with admin rights and affects all audio on that device), or inject into `soloist.exe` (Spotify audio only, but may break Spotify's terms, and antivirus may flag it)
+- [ ] Simple panel with presets (Flat, Bass, Vocal and so on)

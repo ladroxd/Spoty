@@ -3,7 +3,7 @@
 //! and can't cancel it, so the window's close message is intercepted before it gets there.
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
@@ -23,6 +23,8 @@ static QUITTING: AtomicBool = AtomicBool::new(false);
 /// Follows the "close button hides to tray" preference.
 pub static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 static HINT_SHOWN: AtomicBool = AtomicBool::new(false);
+/// Spoty's window, for the threads that can't look it up themselves.
+static WINDOW: AtomicUsize = AtomicUsize::new(0);
 
 /// Adds the tray icon and takes over the close button. Call from the UI thread once the window exists.
 pub fn install() -> bool {
@@ -30,6 +32,7 @@ pub fn install() -> bool {
     if hwnd.is_null() {
         return false;
     }
+    WINDOW.store(hwnd as usize, Ordering::SeqCst);
     unsafe {
         SetWindowSubclass(hwnd, Some(window_proc), 1, 0);
     }
@@ -41,8 +44,25 @@ pub fn install() -> bool {
 pub fn hide_own_window() {
     let hwnd = find_own_window();
     if !hwnd.is_null() {
-        unsafe { ShowWindow(hwnd, SW_HIDE) };
+        hide(hwnd);
     }
+}
+
+/// Hides the window and hands back the memory only drawing needed: nothing is drawn while
+/// Spoty sits in the tray, and Windows brings the pages back when it reappears.
+fn hide(hwnd: HWND) {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+    unsafe {
+        ShowWindow(hwnd, SW_HIDE);
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+/// False while the window is hidden in the tray or minimized, when drawing would be wasted.
+/// Safe from any thread. Reads true until the tray is set up.
+pub fn window_on_screen() -> bool {
+    let hwnd = WINDOW.load(Ordering::SeqCst) as HWND;
+    hwnd.is_null() || unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 }
 }
 
 /// Shows and focuses a window, un-minimizing it if needed.
@@ -161,7 +181,7 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match msg {
         WM_CLOSE if !QUITTING.load(Ordering::SeqCst) && CLOSE_TO_TRAY.load(Ordering::SeqCst) => {
-            unsafe { ShowWindow(hwnd, SW_HIDE) };
+            hide(hwnd);
             show_hint(hwnd);
             return 0;
         }

@@ -8,13 +8,16 @@
 
 ---
 
-Spoty is a lightweight alternative to the Spotify desktop app. It's written in Rust and draws its own UI on the CPU, so there's no browser engine and no GPU driver loaded into the process. It sits at about 30 MB of memory and uses no CPU when idle.
+Spoty is a lightweight alternative to the Spotify desktop app. It's written in Rust and draws its own UI on the CPU, so there's no browser engine and no GPU driver loaded into the process. It sits at about 25 MB of memory in its default window, about 32 MB maximized on a 1080p screen, and uses no CPU when idle. The Soloist player runs as its own process and uses another 45 to 60 MB.
 
 ## Features
 
-- Search, Liked Songs, playlists, saved albums and followed artists
-- Album and playlist covers, loaded only for what's on screen (capped at about 1.5 MB)
-- Play, pause, seek, next and previous, shuffle, repeat, volume
+- Search for songs, albums and artists
+- Artist pages with popular songs, albums, singles, compilations and appearances
+- Liked Songs, playlists, saved albums and followed artists
+- Sort the songs in any playlist by date added, title, artist or album, or arrange your own order
+- Album and playlist covers, loaded only for what's on screen (capped at about 400 KB)
+- Play, pause, seek, next and previous, shuffle, repeat (all or one song), volume
 - Closes to the system tray; optional start with Windows
 - One window only: launching it twice switches to the open one
 - Preferences for the device name, starting volume and audio cache limit
@@ -48,6 +51,8 @@ Everything stays on your PC, in `%APPDATA%\Spoty`:
 | `refresh_token` | Keeps you signed in |
 | `soloist.json` | Your Soloist API key |
 | `settings.json` | Your preferences |
+| `pins.json` | Your pinned items |
+| `song-sorts.json`, `orders\` | How each playlist's songs are sorted, and your custom orders |
 | `soloist\`, `soloist-data\` | The Soloist player and its sign-in |
 
 Soloist's audio cache is in `%LOCALAPPDATA%\Spoty\cache`, limited to 500 MB by default.

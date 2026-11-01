@@ -6,8 +6,33 @@ All notable changes to Spoty are listed here, newest first. Planned work is in [
 
 ### Added
 
+- **Artist pages:** popular songs, albums, singles and EPs, compilations and appearances, each on its own tab.
+- **Search for albums and artists:** results now have Songs, Albums and Artists tabs, and any album can be opened without saving it first. Song search returns up to 50 results instead of 20.
+- **Clickable names:** click an artist or album on a song row, or an artist or song title in the player bar, to open its page.
+- **Back:** a back button returns through the pages you've opened. Alt+Left and the mouse's back button work too.
+- **Shuffle and repeat buttons** beside the player controls. Repeat cycles through off, all songs and this song.
+- **Sort the songs in a playlist:** each playlist and Liked Songs has a sort button with playlist order, recently or oldest added, title, artist and album. Each list remembers its choice, and playback follows the order on screen. Title, artist and album need one request per song, so they're for lists of up to 1,000 songs.
+- **Custom song order:** drag songs into your own order, or right-click one to move it to the top or bottom. It's saved on this PC, not on Spotify. Songs added to the playlist later appear at the end.
 - `TODO.md` with the plan for Linux and macOS versions.
 - This changelog.
+
+### Changed
+
+- **Much less memory when the window is large:** about 60 MB down to 32 MB maximized on a 1080p screen, and 30 MB down to 25 MB in the default window, by turning off the renderer's cache of window-sized images.
+- **Almost no memory in use while in the tray:** Spoty stops drawing while hidden or minimized and hands back the memory only drawing needed.
+- Thumbnails are decoded at the size they're drawn, and at most 100 are kept (about 400 KB, down from 1.4 MB).
+- The unshuffled queue is only kept while shuffle is on, and idle network connections close sooner.
+- Song and album details kept in memory are now limited; whatever isn't on an open list or in the queue is dropped once there are too many.
+- Spoty no longer downloads your whole Liked Songs list at startup just to find out who is signed in.
+
+### Fixed
+
+- **Next and Previous:** after Spotify's autoplay moved on from a song, or when resuming the song Spoty opened with, the queue shrank to one song, so Next did nothing and Previous only restarted the song. They now always move between songs, handing over to Spotify when the queue runs out.
+- Previous now always goes to the previous song instead of restarting the current one after the first 3 seconds. On the first song of a list it restarts.
+- A song Spotify swapped for another release of itself no longer stops the queue from moving on.
+- Repeat is sent to the player again when it starts, so a mode chosen before it was ready still applies.
+- With repeat on "this song", a song that ends no longer moves on to the next one in the queue.
+- Each list now keeps its own scroll position instead of sharing one.
 
 ## [0.1.0] - 2026-10-28
 

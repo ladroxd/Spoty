@@ -6,10 +6,11 @@ use egui::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{self, Audio, AuthState, Cmd, Repeat, State, View};
+use crate::engine::{self, Audio, AuthState, Cmd, Repeat, State, Tab, View};
 use crate::prefs::{self, Prefs};
-use crate::library::Track;
+use crate::library::{self, ArtistRef, Track};
 use crate::soloist;
+use crate::songs::{self, SongSort};
 
 const ACCENT: Color32 = Color32::from_rgb(88, 204, 140);
 const BG: Color32 = Color32::from_rgb(18, 18, 20);
@@ -18,8 +19,11 @@ const MUTED: Color32 = Color32::from_rgb(150, 150, 158);
 const ROW_H: f32 = 40.0;
 const NAV_H: f32 = 28.0;
 const NAV2_H: f32 = 40.0;
-/// Most album thumbnails kept in memory (about 9 KB each); the least recently seen go first.
-const MAX_THUMBS: usize = 150;
+/// Most thumbnails kept in memory (about 4 KB each); the least recently seen go first.
+/// More than fit on a 4K screen at once, so rows on screen are never thrown out.
+const MAX_THUMBS: usize = 100;
+/// The size thumbnails are drawn at, in points.
+const THUMB_SIZE: f32 = 32.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Owner {
@@ -58,6 +62,8 @@ pub struct App {
     lib_filter: String,
     /// Which playlists to show by owner.
     owner: Owner,
+    /// The song being dragged to a new place in a custom order.
+    dragging: Option<usize>,
     /// Album thumbnails, with the frame each was last drawn in.
     thumbs: std::collections::HashMap<String, (TextureHandle, u64)>,
     thumbs_pending: std::collections::HashSet<String>,
@@ -87,6 +93,7 @@ impl App {
             lib_tab: LibTab::Playlists,
             lib_filter: String::new(),
             owner: Owner::All,
+            dragging: None,
             thumbs: Default::default(),
             thumbs_pending: Default::default(),
             frame: 0,
@@ -264,7 +271,7 @@ impl App {
             ui.scope(|ui| self.menus(ui, s));
             ui.add_space(8.0);
             let edit = egui::TextEdit::singleline(&mut self.query)
-                .hint_text("Search songs")
+                .hint_text("Search songs, albums, artists")
                 .desired_width(320.0)
                 .margin(Margin::symmetric(10, 6));
             let r = ui.add(edit);
@@ -371,14 +378,12 @@ impl App {
                         let sub = if pinned { format!("Pinned · {songs}") } else { songs };
                         let r = nav_item2(ui, thumb, &p.name, &sub, pinned, s.view == View::Playlist(p.uri.clone()));
                         if r.clicked() {
-                            self.send(Cmd::OpenPlaylist(p.clone()));
+                            self.send(Cmd::OpenPlaylist(p.uri.clone()));
                         }
                         pin_menu(&r, &p.uri, pinned, &mut toggle_pin);
                     }
                 });
-                if !want_thumbs.is_empty() {
-                    self.send(Cmd::NeedThumbs(want_thumbs));
-                }
+                self.request_thumbs(ui, want_thumbs);
             }
             LibTab::Albums => {
                 let albums = s.albums.as_deref().unwrap_or_default();
@@ -414,9 +419,7 @@ impl App {
                         pin_menu(&r, uri, pinned, &mut toggle_pin);
                     }
                 });
-                if !want_thumbs.is_empty() {
-                    self.send(Cmd::NeedThumbs(want_thumbs));
-                }
+                self.request_thumbs(ui, want_thumbs);
             }
             LibTab::Artists => {
                 let artists = s.artists.as_deref().unwrap_or_default();
@@ -461,28 +464,131 @@ impl App {
     fn track_list(&mut self, ui: &mut egui::Ui, s: &State) {
         if s.view == View::Empty {
             ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Search for a song, or pick something from your library on the left.").color(MUTED));
+                ui.label(RichText::new("Search for a song, album or artist, or pick something from your library on the left.").color(MUTED));
             });
             return;
         }
+        if s.can_go_back && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1) || (i.modifiers.alt && i.key_pressed(Key::ArrowLeft))) {
+            self.send(Cmd::Back);
+        }
+        let mut want_thumbs = Vec::new();
         ui.horizontal(|ui| {
+            if s.can_go_back && icon_button(ui, "⬅", 28.0, false).on_hover_text("Back (Alt+Left)").clicked() {
+                self.send(Cmd::Back);
+            }
+            // A small portrait or cover beside the name.
+            if let View::Artist(uri) | View::Album(uri) = &s.view {
+                let url = s.names.get(uri).and_then(|n| n.thumb_url.as_deref());
+                if let Some(id) = self.thumb(uri, url, &mut want_thumbs) {
+                    let radius = if matches!(s.view, View::Artist(_)) { 16 } else { 4 };
+                    ui.add(egui::Image::new((id, Vec2::splat(THUMB_SIZE))).corner_radius(radius));
+                }
+            }
             ui.label(RichText::new(&s.title).size(20.0).strong());
-            if s.loading {
+            if let Some((done, total)) = s.sort_progress {
+                ui.spinner();
+                ui.label(RichText::new(format!("Sorting… {done} of {total}")).color(MUTED));
+            } else if s.loading {
                 ui.spinner();
             } else {
-                ui.label(RichText::new(format!("{} songs", s.list.len())).color(MUTED));
+                let count = if s.tab == Tab::Songs { s.list.len() } else { s.page.items(s.tab).len() };
+                ui.label(RichText::new(count_label(count, s.tab)).color(MUTED));
+            }
+            if s.view.sortable_uri().is_some() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.sort_menu(ui, s));
             }
         });
+        ui.add_space(4.0);
+        self.tabs(ui, s);
+        if s.view.sortable_uri().is_some() && s.song_sort == SongSort::Custom {
+            let hint = "Drag a song by the handle on its left, or right-click it. This order is saved on this PC, not on Spotify.";
+            ui.label(RichText::new(hint).small().color(MUTED));
+        }
         ui.add_space(6.0);
 
-        if !s.loading && s.list.is_empty() {
-            ui.label(RichText::new("Nothing here.").color(MUTED));
-            return;
+        let empty = if s.tab == Tab::Songs { s.list.is_empty() } else { s.page.items(s.tab).is_empty() };
+        if empty {
+            // While loading, leave the list alone so Back returns to the same scroll position.
+            if !s.loading {
+                ui.label(RichText::new("Nothing here.").color(MUTED));
+            }
+        } else if s.tab == Tab::Songs {
+            self.song_rows(ui, s);
+        } else {
+            self.release_rows(ui, s, &mut want_thumbs);
         }
+        self.request_thumbs(ui, want_thumbs);
+    }
+
+    /// Asks for thumbnails at the pixel size they'll be drawn at on this screen.
+    fn request_thumbs(&self, ui: &egui::Ui, want: Vec<(String, String)>) {
+        if !want.is_empty() {
+            self.send(Cmd::NeedThumbs(want, (THUMB_SIZE * ui.ctx().pixels_per_point()).ceil() as u32));
+        }
+    }
+
+    fn sort_menu(&self, ui: &mut egui::Ui, s: &State) {
+        ui.menu_button(format!("Sort: {} ⏷", s.song_sort.label()), |ui| {
+            for (sort, label, _) in SongSort::ALL {
+                let too_long = sort.needs_details() && s.list.len() > songs::MAX_SONGS_FOR_NAME_SORT;
+                let item = ui
+                    .add_enabled(!too_long, egui::Button::selectable(s.song_sort == sort, label))
+                    .on_disabled_hover_text("Only for lists of up to 1,000 songs");
+                if item.clicked() {
+                    if s.song_sort != sort {
+                        self.send(Cmd::SetSongSort(sort));
+                    }
+                    ui.close();
+                }
+            }
+            if s.song_sort == SongSort::Custom {
+                ui.separator();
+                if ui.button("Reset custom order").clicked() {
+                    self.send(Cmd::ResetCustomOrder);
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    /// The chips on search results and artist pages. Empty sections don't get one.
+    fn tabs(&mut self, ui: &mut egui::Ui, s: &State) {
+        let tabs: &[(Tab, &str)] = match s.view {
+            View::Search(_) => &[(Tab::Songs, "Songs"), (Tab::Albums, "Albums"), (Tab::Artists, "Artists")],
+            View::Artist(_) => &[
+                (Tab::Songs, "Popular"),
+                (Tab::Albums, "Albums"),
+                (Tab::Singles, "Singles and EPs"),
+                (Tab::Compilations, "Compilations"),
+                (Tab::AppearsOn, "Appears on"),
+            ],
+            _ => return,
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for &(tab, label) in tabs {
+                let has_items = if tab == Tab::Songs { !s.list.is_empty() } else { !s.page.items(tab).is_empty() };
+                if has_items && ui.add(egui::Button::selectable(s.tab == tab, label).corner_radius(12)).clicked() && s.tab != tab {
+                    self.send(Cmd::SetTab(tab));
+                }
+            }
+        });
+    }
+
+    fn song_rows(&mut self, ui: &mut egui::Ui, s: &State) {
         let playing_uri = s.current_uri();
-        let mut clicked = None;
+        let reorder = s.view.sortable_uri().is_some() && s.song_sort == SongSort::Custom && !s.loading;
+        if !reorder {
+            self.dragging = None;
+        }
+        let mut action = None;
         let mut missing = Vec::new();
-        egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, ROW_H, s.list.len(), |ui, rows| {
+        let mut area = egui::ScrollArea::vertical().auto_shrink(false).id_salt((&s.view, s.tab, s.song_sort));
+        if reorder {
+            // A drag moves a song rather than the list.
+            area = area.scroll_source(egui::containers::scroll_area::ScrollSource { drag: false, ..Default::default() });
+        }
+        area.show_rows(ui, ROW_H, s.list.len(), |ui, rows| {
             // Ask for details a screen ahead so scrolling stays smooth.
             let ahead = rows.end..(rows.end + rows.len()).min(s.list.len());
             for i in rows.clone().chain(ahead) {
@@ -490,18 +596,82 @@ impl App {
                     missing.push(s.list[i].clone());
                 }
             }
+            let first_row = rows.start;
+            let top = ui.cursor().top();
             for i in rows {
                 let uri = &s.list[i];
-                if track_row(ui, i, s.details.get(uri), playing_uri == Some(uri.as_str())) {
-                    clicked = Some(i);
+                let lifted = self.dragging == Some(i);
+                match track_row(ui, i, s.details.get(uri), playing_uri == Some(uri.as_str()), reorder, lifted) {
+                    RowAction::None => {}
+                    RowAction::Play => action = Some(Cmd::Play(s.list.clone(), i)),
+                    RowAction::Artist(id) => action = Some(Cmd::OpenArtist(library::artist_uri(id))),
+                    RowAction::Album(id) => action = Some(Cmd::OpenAlbum(library::album_uri(id))),
+                    RowAction::Grab => self.dragging = Some(i),
+                    RowAction::MoveToTop => action = Some(Cmd::MoveSong(i, 0)),
+                    RowAction::MoveToBottom => action = Some(Cmd::MoveSong(i, s.list.len())),
+                }
+            }
+            if let Some(from) = self.dragging {
+                let (held, pointer) = ui.input(|i| (i.pointer.primary_down(), i.pointer.latest_pos()));
+                let Some(pointer) = pointer else {
+                    // Let go outside the window: the song stays where it was.
+                    if !held {
+                        self.dragging = None;
+                    }
+                    return;
+                };
+                let spacing = ui.spacing().item_spacing.y;
+                let gap = drop_gap(pointer.y, top, ROW_H + spacing, first_row, s.list.len());
+                let line_y = top + (gap as f32 - first_row as f32) * (ROW_H + spacing) - spacing / 2.0;
+                ui.painter().hline(ui.max_rect().x_range(), line_y, Stroke::new(2.0_f32, ACCENT));
+                // Near the top or bottom edge, scroll to reach songs that are off screen.
+                let clip = ui.clip_rect();
+                let edge = 48.0;
+                let speed = 14.0;
+                let up = (clip.top() + edge - pointer.y).clamp(0.0, edge) / edge;
+                let down = (pointer.y - clip.bottom() + edge).clamp(0.0, edge) / edge;
+                ui.scroll_with_delta(Vec2::new(0.0, (up - down) * speed));
+                ui.ctx().request_repaint();
+                if !held {
+                    self.dragging = None;
+                    action = Some(Cmd::MoveSong(from, gap));
                 }
             }
         });
         if !missing.is_empty() {
             self.send(Cmd::NeedDetails(missing));
         }
-        if let Some(i) = clicked {
-            self.send(Cmd::Play(s.list.clone(), i));
+        if let Some(cmd) = action {
+            self.send(cmd);
+        }
+    }
+
+    /// Albums or artists on search results and artist pages. Only rows on screen load anything.
+    fn release_rows(&mut self, ui: &mut egui::Ui, s: &State, want_thumbs: &mut Vec<(String, String)>) {
+        let items = s.page.items(s.tab);
+        let show_artists = matches!(s.view, View::Search(_)) || s.tab == Tab::AppearsOn;
+        let mut missing = Vec::new();
+        let mut open = None;
+        let area = egui::ScrollArea::vertical().auto_shrink(false).id_salt((&s.view, s.tab));
+        area.show_rows(ui, NAV2_H, items.len(), |ui, rows| {
+            for uri in &items[rows] {
+                let named = s.names.get(uri);
+                if named.is_none() {
+                    missing.push(uri.clone());
+                }
+                let thumb = self.thumb(uri, named.and_then(|n| n.thumb_url.as_deref()), want_thumbs);
+                let title = named.map_or("…", |n| n.name.as_str());
+                let sub = named.map_or(String::new(), |n| release_subtitle(n.year, &n.subtitle, show_artists));
+                if nav_item2(ui, thumb, title, &sub, false, false).clicked() {
+                    open = Some(uri.clone());
+                }
+            }
+        });
+        if !missing.is_empty() {
+            self.send(Cmd::NeedNames(missing));
+        }
+        if let Some(uri) = open {
+            self.send(if uri.starts_with("spotify:artist:") { Cmd::OpenArtist(uri) } else { Cmd::OpenAlbum(uri) });
         }
     }
 
@@ -524,8 +694,16 @@ impl App {
                 ui.vertical(|ui| {
                     ui.add_space(10.0);
                     if let Some(t) = track {
-                        ui.add(egui::Label::new(RichText::new(&t.name).strong()).truncate());
-                        ui.add(egui::Label::new(RichText::new(&t.artists).color(MUTED).small()).truncate());
+                        let title = ui.add(egui::Label::new(RichText::new(&t.name).strong()).truncate().sense(Sense::click()));
+                        if let Some(id) = t.album_id
+                            && title.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(&t.album).clicked()
+                        {
+                            self.send(Cmd::OpenAlbum(library::album_uri(id)));
+                        }
+                        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+                        if let Some(id) = artist_links(ui, r.id, rect, &t.artists) {
+                            self.send(Cmd::OpenArtist(library::artist_uri(id)));
+                        }
                     }
                 });
             });
@@ -535,8 +713,12 @@ impl App {
             let mid_w = (ui.available_width() - vol_w - 16.0).max(120.0);
             ui.allocate_ui_with_layout(Vec2::new(mid_w, 64.0), Layout::top_down(Align::Center), |ui| {
                 ui.horizontal(|ui| {
-                    let btns = 3.0 * 36.0 + 2.0 * ui.spacing().item_spacing.x;
+                    let btns = 5.0 * 36.0 + 4.0 * ui.spacing().item_spacing.x;
                     ui.add_space(((ui.available_width() - btns) / 2.0).max(0.0));
+                    let shuffle_tip = if s.shuffle { "Shuffle: on" } else { "Shuffle: off" };
+                    if mode_button(ui, "🔀", s.shuffle).on_hover_text(shuffle_tip).clicked() {
+                        self.send(Cmd::SetShuffle(!s.shuffle));
+                    }
                     if icon_button(ui, "⏮", 36.0, false).clicked() {
                         self.send(Cmd::Prev);
                     }
@@ -545,6 +727,15 @@ impl App {
                     }
                     if icon_button(ui, "⏭", 36.0, false).clicked() {
                         self.send(Cmd::Next);
+                    }
+                    // Each click moves on to the next mode: off, whole list, this song.
+                    let (icon, tip, next) = match s.repeat {
+                        Repeat::Off => ("🔁", "Repeat: off", Repeat::All),
+                        Repeat::All => ("🔁", "Repeat: all songs", Repeat::One),
+                        Repeat::One => ("🔂", "Repeat: this song", Repeat::Off),
+                    };
+                    if mode_button(ui, icon, s.repeat != Repeat::Off).on_hover_text(tip).clicked() {
+                        self.send(Cmd::SetRepeat(next));
                     }
                 });
                 if s.audio != Audio::Ready {
@@ -1000,7 +1191,7 @@ fn nav_item2(
         let fill = if selected { Color32::from_rgb(40, 40, 46) } else { Color32::from_rgb(32, 32, 37) };
         ui.painter().rect_filled(rect, 6, fill);
     }
-    let cover = egui::Rect::from_min_size(rect.left_top() + Vec2::new(4.0, 4.0), Vec2::splat(32.0));
+    let cover = egui::Rect::from_min_size(rect.left_top() + Vec2::new(4.0, 4.0), Vec2::splat(THUMB_SIZE));
     match thumb {
         Some(id) => {
             egui::Image::new((id, cover.size())).corner_radius(4).paint_at(ui, cover);
@@ -1039,16 +1230,96 @@ fn nav_item(ui: &mut egui::Ui, text: &str, pinned: bool, selected: bool) -> egui
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Draws one track row. Returns true when the user asked to play it
-/// (clicking the play button, or double-clicking the row).
-fn track_row(ui: &mut egui::Ui, i: usize, t: Option<&Track>, is_current: bool) -> bool {
+enum RowAction {
+    None,
+    /// Clicked the play button, or double-clicked the row.
+    Play,
+    Artist(u128),
+    Album(u128),
+    /// Started dragging the song to a new place.
+    Grab,
+    MoveToTop,
+    MoveToBottom,
+}
+
+/// Which gap between songs a dragged song would land in, given the pointer's height, the top of
+/// the first row drawn and that row's position in the list.
+fn drop_gap(pointer_y: f32, top: f32, row_pitch: f32, first_row: usize, len: usize) -> usize {
+    let rows_down = ((pointer_y - top) / row_pitch).round();
+    (first_row as f32 + rows_down).clamp(0.0, len as f32) as usize
+}
+
+/// Text that acts as a link: underlined while hovered. Returns its response.
+fn text_link(ui: &egui::Ui, id: egui::Id, pos: egui::Pos2, galley: Arc<egui::Galley>) -> egui::Response {
+    let rect = egui::Rect::from_min_size(pos, galley.size());
+    let r = ui.interact(rect, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if r.hovered() {
+        ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(1.0_f32, MUTED));
+    }
+    ui.painter().galley(pos, galley, MUTED);
+    r
+}
+
+/// A song's artists on one line, each one clickable. Returns the artist that was clicked.
+fn artist_links(ui: &egui::Ui, id: egui::Id, rect: egui::Rect, artists: &[ArtistRef]) -> Option<u128> {
+    let font = FontId::proportional(12.0);
+    let mut pos = rect.left_top();
+    let mut clicked = None;
+    for (i, artist) in artists.iter().enumerate() {
+        let left = rect.right() - pos.x;
+        if left < 20.0 {
+            break;
+        }
+        if i > 0 {
+            let comma = elide(ui, ", ", font.clone(), MUTED, left);
+            let w = comma.size().x;
+            ui.painter().galley(pos, comma, MUTED);
+            pos.x += w;
+        }
+        let name = elide(ui, &artist.name, font.clone(), MUTED, rect.right() - pos.x);
+        let w = name.size().x;
+        if text_link(ui, id.with(i), pos, name).clicked() {
+            clicked = Some(artist.id);
+        }
+        pos.x += w;
+    }
+    clicked
+}
+
+/// Draws one track row and reports what the user did with it.
+fn track_row(ui: &mut egui::Ui, i: usize, t: Option<&Track>, is_current: bool, reorder: bool, lifted: bool) -> RowAction {
     let w = ui.available_width();
     let (rect, r) = ui.allocate_exact_size(Vec2::new(w, ROW_H), Sense::click());
     // The play button sits just left of the title; added after the row so it takes the click.
     let btn_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 48.0, rect.center().y), Vec2::splat(26.0));
     let btn = ui.interact(btn_rect, r.id.with("play"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let play = btn.clicked() || r.double_clicked();
-    if r.hovered() || btn.hovered() {
+    let mut action = if play { RowAction::Play } else { RowAction::None };
+    // In a custom order the number makes room for a drag handle on the row under the pointer.
+    let mut show_handle = false;
+    let mut handle_hovered = false;
+    if reorder {
+        let handle_rect = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + 32.0, rect.bottom()));
+        let handle = ui.interact(handle_rect, r.id.with("handle"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+        handle_hovered = handle.hovered();
+        show_handle = r.hovered() || btn.hovered() || handle_hovered || lifted;
+        if handle.drag_started() {
+            action = RowAction::Grab;
+        }
+        r.context_menu(|ui| {
+            if ui.button("Move to top").clicked() {
+                action = RowAction::MoveToTop;
+                ui.close();
+            }
+            if ui.button("Move to bottom").clicked() {
+                action = RowAction::MoveToBottom;
+                ui.close();
+            }
+        });
+    }
+    if lifted {
+        ui.painter().rect_filled(rect, 6, ACCENT.gamma_multiply(0.18));
+    } else if r.hovered() || btn.hovered() || handle_hovered {
         ui.painter().rect_filled(rect, 6, Color32::from_rgb(38, 38, 44));
     }
     let p = ui.painter();
@@ -1063,19 +1334,26 @@ fn track_row(ui: &mut egui::Ui, i: usize, t: Option<&Track>, is_current: bool) -
     p.text(btn_rect.center() + Vec2::new(1.0, 0.0), Align2::CENTER_CENTER, "▶", FontId::proportional(11.0), fg);
     let text = if is_current { ACCENT } else { ui.visuals().strong_text_color() };
     let x = rect.left();
-    p.text(
-        egui::pos2(x + 24.0, rect.center().y),
-        Align2::RIGHT_CENTER,
-        (i + 1).to_string(),
-        FontId::proportional(12.0),
-        MUTED,
-    );
+    if show_handle {
+        for dy in [-4.0, 0.0, 4.0] {
+            let y = rect.center().y + dy;
+            p.hline((x + 10.0)..=(x + 24.0), y, Stroke::new(1.5_f32, Color32::from_rgb(200, 200, 208)));
+        }
+    } else {
+        p.text(
+            egui::pos2(x + 24.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            (i + 1).to_string(),
+            FontId::proportional(12.0),
+            MUTED,
+        );
+    }
     let Some(t) = t else {
         // Details still loading: draw placeholder bars.
         let bar = |y: f32, w: f32| egui::Rect::from_min_size(egui::pos2(x + 70.0, y), Vec2::new(w, 9.0));
         p.rect_filled(bar(rect.top() + 8.0, (w * 0.3).min(220.0)), 3, Color32::from_rgb(40, 40, 46));
         p.rect_filled(bar(rect.top() + 24.0, (w * 0.18).min(140.0)), 3, Color32::from_rgb(36, 36, 41));
-        return play;
+        return action;
     };
     p.text(egui::pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, clock(t.duration_ms), FontId::proportional(12.0), MUTED);
 
@@ -1084,13 +1362,41 @@ fn track_row(ui: &mut egui::Ui, i: usize, t: Option<&Track>, is_current: bool) -
     let top = rect.top() + 4.0;
     let name = elide(ui, &t.name, FontId::proportional(14.0), text, title_w);
     p.galley(egui::pos2(x + 70.0, top), name, text);
-    let artists = elide(ui, &t.artists, FontId::proportional(12.0), MUTED, title_w);
-    p.galley(egui::pos2(x + 70.0, top + 18.0), artists, MUTED);
+    let artists_rect = egui::Rect::from_min_size(egui::pos2(x + 70.0, top + 18.0), Vec2::new(title_w, 16.0));
+    if let Some(id) = artist_links(ui, r.id.with("artists"), artists_rect, &t.artists) {
+        action = RowAction::Artist(id);
+    }
     if album_w > 0.0 {
         let album = elide(ui, &t.album, FontId::proportional(12.0), MUTED, album_w - 12.0);
-        p.galley(egui::pos2(rect.right() - 70.0 - album_w, rect.center().y - 7.0), album, MUTED);
+        let pos = egui::pos2(rect.right() - 70.0 - album_w, rect.center().y - 7.0);
+        if text_link(ui, r.id.with("album"), pos, album).clicked()
+            && let Some(id) = t.album_id
+        {
+            action = RowAction::Album(id);
+        }
     }
-    play
+    action
+}
+
+fn count_label(count: usize, tab: Tab) -> String {
+    let noun = match tab {
+        Tab::Songs => "song",
+        Tab::Artists => "artist",
+        Tab::Singles => "release",
+        _ => "album",
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {noun}{plural}")
+}
+
+/// "2013", or "2013 · Daft Punk" where the artist isn't obvious from the page.
+fn release_subtitle(year: u16, artists: &str, show_artists: bool) -> String {
+    let artists = if show_artists { artists } else { "" };
+    match (year, artists) {
+        (0, a) => a.to_string(),
+        (y, "") => y.to_string(),
+        (y, a) => format!("{y} · {a}"),
+    }
 }
 
 fn elide(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<egui::Galley> {
@@ -1111,7 +1417,38 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, size: f32, primary: bool) -> egui:
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// A player mode that's on or off, like shuffle: green with a small dot while it's on.
+fn mode_button(ui: &mut egui::Ui, icon: &str, on: bool) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
+    if r.hovered() {
+        ui.painter().circle_filled(rect.center(), 18.0, Color32::from_rgb(44, 44, 50));
+    }
+    let color = if on { ACCENT } else { MUTED };
+    ui.painter().text(rect.center() - Vec2::new(0.0, 1.0), Align2::CENTER_CENTER, icon, FontId::proportional(16.0), color);
+    if on {
+        ui.painter().circle_filled(rect.center_bottom() - Vec2::new(0.0, 5.0), 1.5, ACCENT);
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn clock(ms: u32) -> String {
     let s = ms / 1000;
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_drop_gap_follows_the_pointer_and_stays_in_the_list() {
+        // Rows 50 apart, with row 10 at the top of the view starting at y = 100.
+        let gap = |y| drop_gap(y, 100.0, 50.0, 10, 20);
+        assert_eq!(gap(100.0), 10);
+        assert_eq!(gap(120.0), 10);
+        assert_eq!(gap(130.0), 11);
+        assert_eq!(gap(380.0), 16);
+        assert_eq!(gap(-5000.0), 0);
+        assert_eq!(gap(5000.0), 20);
+    }
 }
