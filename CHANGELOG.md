@@ -4,6 +4,8 @@ All notable changes to Spoty are listed here, newest first. Planned work is in [
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-02
+
 ### Added
 
 - **Artist pages:** popular songs, albums, singles and EPs, compilations and appearances, each on its own tab.
@@ -74,5 +76,6 @@ These shaped 0.1.0 but were never released separately:
 - Two copies of Spoty could start two Soloist players and break playback; now only one can run.
 - The Task Manager icon was missing in builds made before the icon was embedded.
 
-[Unreleased]: https://github.com/ladroxd/spoty/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ladroxd/spoty/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/ladroxd/spoty/compare/v0.1.0...v1.4.0
 [0.1.0]: https://github.com/ladroxd/spoty/releases/tag/v0.1.0
